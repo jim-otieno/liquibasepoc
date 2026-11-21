@@ -19,6 +19,8 @@
 
   <properties>
     <java.version>21</java.version>
+    <!-- Newer than Spring Boot 3.3.5's default: works with Docker Engine 29+, which rejects old API versions -->
+    <testcontainers.version>1.21.3</testcontainers.version>
   </properties>
 
   <dependencies>

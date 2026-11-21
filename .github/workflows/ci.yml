@@ -25,6 +25,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v5
         with: { distribution: temurin, java-version: '21', cache: maven }
+      - name: Pin Docker API version for Testcontainers
+        # Docker Engine 29 on the runners rejects API versions below 1.44,
+        # which older docker-java clients request by default.
+        run: |
+          echo "api.version=1.44" > ~/.docker-java.properties
+          docker version --format 'Docker server {{.Server.Version}}, API {{.Server.APIVersion}} (min {{.Server.MinAPIVersion}})'
       - name: Build + CompatibilityMatrixTest
         working-directory: app
         # Maven Central rate-limits shared runners (HTTP 429). The resolver
