@@ -90,19 +90,21 @@ jobs:
       - run: chmod +x scripts/*.sh
       - name: Check AWS_ROLE_ARN repository variable
         env:
-          ROLE: ${{ vars.AWS_ROLE_ARN }}
+          # A repository variable is preferred; a repository secret of the same name also works.
+          ROLE: ${{ vars.AWS_ROLE_ARN || secrets.AWS_ROLE_ARN }}
+          SOURCE: ${{ vars.AWS_ROLE_ARN != '' && 'variable' || 'secret' }}
         run: |
           if [ -z "$ROLE" ]; then
-            echo "::error title=AWS_ROLE_ARN not visible::No repository variable AWS_ROLE_ARN is visible to this job. Add it under Settings > Secrets and variables > Actions > Variables > Repository variables (not Secrets, not an Environment)."
+            echo "::error title=AWS_ROLE_ARN not visible::Neither a repository variable nor a repository secret named AWS_ROLE_ARN is visible to this job. Add it under Settings > Secrets and variables > Actions (not under an Environment)."
             exit 1
           fi
           case "$ROLE" in
-            arn:aws:iam::*:role/*) echo "::notice title=AWS_ROLE_ARN::variable visible, role $(echo "$ROLE" | sed 's#.*:role/##')" ;;
+            arn:aws:iam::*:role/*) echo "::notice title=AWS_ROLE_ARN::found as repository $SOURCE" ;;
             *) echo "::error title=AWS_ROLE_ARN malformed::The variable is set but is not an IAM role ARN (length ${#ROLE}, starts with '${ROLE:0:12}')."; exit 1 ;;
           esac
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_ROLE_ARN || secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Look up RDS, read password, open port to this runner
