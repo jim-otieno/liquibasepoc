@@ -1,0 +1,8 @@
+global:
+  scrape_interval: 1s   # fine-grained: a migration phase can be short
+
+scrape_configs:
+  - job_name: customer-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["app-a:8080", "app-b:8080"]

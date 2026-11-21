@@ -1,0 +1,133 @@
+// Phase-structured expand/contract pipeline (Jenkins declarative).
+//
+// Agent needs: docker, bash, python3, k6, curl.
+// Credentials (Manage Jenkins > Credentials), both of kind "Secret text":
+//   poc-db-user, poc-db-password
+// Parameters let the same pipeline run against PostgreSQL or Oracle.
+pipeline {
+  agent any
+
+  parameters {
+    choice(name: 'DBMS', choices: ['postgresql', 'oracle'], description: 'Target database')
+    string(name: 'LB_URL', defaultValue: 'jdbc:postgresql://postgres:5432/poc', description: 'JDBC URL as seen from the Liquibase container')
+    string(name: 'LB_NETWORK', defaultValue: 'liquibase-poc_default', description: 'Docker network of the target stack')
+    string(name: 'SOAK_MINUTES', defaultValue: '30', description: 'Minimum time on NEW_ONLY before contract')
+  }
+
+  options {
+    timestamps()
+    disableConcurrentBuilds()   // one migration at a time per database
+  }
+
+  environment {
+    LB_USER     = credentials('poc-db-user')
+    LB_PASSWORD = credentials('poc-db-password')
+    DB_USER     = credentials('poc-db-user')
+    DB_PASSWORD = credentials('poc-db-password')
+    DB_KIND     = "${params.DBMS}"
+    LB_URL     = "${params.LB_URL}"
+    LB_NETWORK = "${params.LB_NETWORK}"
+    RESULTS    = "results/${env.BUILD_NUMBER}"
+  }
+
+  stages {
+    stage('Lint changelog') {
+      steps {
+        sh '''
+          python3 -m pip install -q -r tools/phase-linter/requirements.txt
+          python3 tools/phase-linter/phase_lint.py db/changelog/db.changelog-master.yaml
+          scripts/liquibase.sh validate
+        '''
+      }
+    }
+
+    stage('Build and compatibility tests') {
+      steps {
+        dir('app') { sh 'mvn -B verify' }   // includes CompatibilityMatrixTest (Testcontainers)
+      }
+      post { always { junit allowEmptyResults: true, testResults: 'app/target/surefire-reports/*.xml' } }
+    }
+
+    stage('Preview SQL') {
+      steps {
+        sh '''
+          mkdir -p "$RESULTS"
+          for p in expand migrate harden contract; do
+            scripts/liquibase.sh update-sql --label-filter=$p > "$RESULTS/$p.sql"
+          done
+        '''
+        archiveArtifacts artifacts: "${env.RESULTS}/*.sql"
+      }
+    }
+
+    stage('Start probes') {
+      steps {
+        sh '''
+          python3 -m pip install -q -r experiments/requirements.txt
+          nohup python3 experiments/lock_sampler.py --run-id "$BUILD_NUMBER" --out "$RESULTS/locks.csv" > "$RESULTS/sampler.log" 2>&1 &
+          echo $! > "$RESULTS/sampler.pid"
+          nohup k6 run -q -e DURATION=2h --summary-export "$RESULTS/k6-summary.json" load/k6-availability.js > "$RESULTS/k6.log" 2>&1 &
+          echo $! > "$RESULTS/k6.pid"
+        '''
+      }
+    }
+
+    stage('Expand') {
+      steps {
+        sh 'scripts/deploy-phase.sh expand "$BUILD_NUMBER"'
+        sh 'scripts/rolling-deploy.sh DUAL_WRITE_READ_OLD'
+      }
+    }
+
+    stage('Migrate') {
+      steps {
+        sh 'python3 experiments/backfill.py --out "$RESULTS/backfill.csv"'
+        sh 'scripts/deploy-phase.sh migrate "$BUILD_NUMBER"'
+        sh 'python3 experiments/verify_integrity.py'
+      }
+    }
+
+    stage('Harden and switch reads') {
+      steps {
+        sh 'scripts/deploy-phase.sh harden "$BUILD_NUMBER"'
+        sh 'scripts/rolling-deploy.sh DUAL_WRITE_READ_NEW'
+        sh 'scripts/rolling-deploy.sh NEW_ONLY'
+      }
+    }
+
+    stage('Soak') {
+      steps {
+        echo "Soaking on NEW_ONLY for ${params.SOAK_MINUTES} minutes before the irreversible step"
+        sleep time: params.SOAK_MINUTES.toInteger(), unit: 'MINUTES'
+        sh 'python3 experiments/verify_integrity.py'
+      }
+    }
+
+    stage('Approve contract') {
+      steps {
+        timeout(time: 7, unit: 'DAYS') {
+          input message: 'CONTRACT drops customer.customer_name. This cannot be rolled back. Proceed?',
+                ok: 'Run contract'
+        }
+      }
+    }
+
+    stage('Contract') {
+      steps {
+        sh 'scripts/deploy-phase.sh contract "$BUILD_NUMBER"'
+        sh 'python3 experiments/verify_integrity.py --after-contract'
+      }
+    }
+  }
+
+  post {
+    failure {
+      // Reversible phases only: roll the schema back to the last tag, apps stay compatible.
+      echo 'Pipeline failed. Roll back with: scripts/liquibase.sh rollback --tag=pre-<phase>-<build> (never past contract).'
+    }
+    always {
+      sh 'for f in "$RESULTS"/*.pid; do [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null || true; done'
+      archiveArtifacts allowEmptyArchive: true, artifacts: "${env.RESULTS}/**"
+    }
+  }
+}

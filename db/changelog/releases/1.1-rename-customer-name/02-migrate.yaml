@@ -1,0 +1,68 @@
+# Phase 2 - MIGRATE
+# Default arm: the backfill runs OUTSIDE Liquibase as a batched, throttled,
+# resumable job (experiments/backfill.py). Liquibase only records that the
+# backfill finished, and refuses to continue if it has not.
+#
+# Experimental arm "backfill inside Liquibase": deploy with
+#   --label-filter=migrate-inline
+# to run the batched UPDATE as a changeset instead.
+databaseChangeLog:
+  - changeSet:
+      id: rcn-02-inline-backfill
+      author: poc
+      labels: migrate-inline
+      runInTransaction: false
+      changes:
+        - sql:
+            dbms: postgresql
+            splitStatements: false
+            sql: |
+              DO $$
+              DECLARE n integer;
+              BEGIN
+                LOOP
+                  UPDATE customer SET full_name = customer_name
+                  WHERE id IN (SELECT id FROM customer
+                               WHERE full_name IS NULL
+                               ORDER BY id LIMIT 5000);
+                  GET DIAGNOSTICS n = ROW_COUNT;
+                  COMMIT;
+                  EXIT WHEN n = 0;
+                END LOOP;
+              END $$;
+        - sql:
+            dbms: oracle
+            splitStatements: false
+            sql: |
+              BEGIN
+                LOOP
+                  UPDATE customer SET full_name = customer_name
+                  WHERE full_name IS NULL AND ROWNUM <= 5000;
+                  EXIT WHEN SQL%ROWCOUNT = 0;
+                  COMMIT;
+                END LOOP;
+                COMMIT;
+              END;
+      rollback:
+        # Idempotent and non-destructive: nothing to undo (explicit no-op).
+        - sql:
+            dbms: postgresql
+            sql: SELECT 1
+        - sql:
+            dbms: oracle
+            sql: SELECT 1 FROM dual
+
+  - changeSet:
+      id: rcn-02-backfill-complete
+      author: poc
+      labels: migrate
+      preConditions:
+        # Halt the pipeline if any row still lacks a value.
+        - onFail: HALT
+        - onFailMessage: Backfill incomplete - rows with full_name IS NULL remain. Run experiments/backfill.py first.
+        - sqlCheck:
+            expectedResult: 0
+            sql: SELECT COUNT(*) FROM customer WHERE full_name IS NULL
+      changes:
+        - tagDatabase:
+            tag: rcn-backfill-complete

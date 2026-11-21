@@ -1,0 +1,29 @@
+# Master changelog.
+# Each release folder holds one migration, split into one file per phase.
+# Every changeset carries exactly one phase label; the pipeline deploys a
+# phase with:  liquibase update --label-filter=<phase>
+#
+# Phase labels: baseline | expand | migrate | migrate-inline | harden | contract
+databaseChangeLog:
+  - include:
+      file: releases/1.0-baseline/changelog.yaml
+      relativeToChangelogFile: true
+
+  # Migration C3: rename customer.customer_name -> customer.full_name
+  - include:
+      file: releases/1.1-rename-customer-name/01-expand.yaml
+      relativeToChangelogFile: true
+  - include:
+      file: releases/1.1-rename-customer-name/02-migrate.yaml
+      relativeToChangelogFile: true
+  - include:
+      file: releases/1.1-rename-customer-name/03-harden.yaml
+      relativeToChangelogFile: true
+  - include:
+      file: releases/1.1-rename-customer-name/04-contract.yaml
+      relativeToChangelogFile: true
+
+  # Migration C6: add an index on a large table without blocking writes
+  - include:
+      file: releases/1.2-index-customer-email/01-expand.yaml
+      relativeToChangelogFile: true

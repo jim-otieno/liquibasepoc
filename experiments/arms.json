@@ -1,0 +1,7 @@
+{
+  "A1-naive": "bash scripts/run-arm.sh naive {run_id} {change} {dbms} {load} {rows} {contention} {results}",
+  "A2-trigger": "bash scripts/run-arm.sh trigger {run_id} {change} {dbms} {load} {rows} {contention} {results}",
+  "A3-app-dual-write": "bash scripts/run-arm.sh dual-write {run_id} {change} {dbms} {load} {rows} {contention} {results}",
+  "A4-enforced": "bash scripts/run-arm.sh enforced {run_id} {change} {dbms} {load} {rows} {contention} {results}",
+  "A5-cdc": "bash scripts/run-arm.sh cdc {run_id} {change} {dbms} {load} {rows} {contention} {results}"
+}

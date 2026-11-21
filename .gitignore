@@ -1,0 +1,22 @@
+# build
+app/target/
+*.class
+
+# python
+__pycache__/
+.pytest_cache/
+.venv/
+
+# local secrets
+db/liquibase.properties
+.env
+
+# experiment output (publish curated data to Zenodo instead)
+results/
+
+# IDE / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db

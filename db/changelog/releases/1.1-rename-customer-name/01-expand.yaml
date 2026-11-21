@@ -1,0 +1,35 @@
+# Phase 1 - EXPAND
+# Add the new column next to the old one. Nullable, no default, no constraint:
+# a metadata-only change on PostgreSQL 11+ and Oracle 11g+.
+# Application v1 keeps working because nothing it uses has changed.
+# After this phase the pipeline rolls out app v2 (APP_SCHEMA_MODE=DUAL_WRITE_READ_OLD).
+databaseChangeLog:
+  - changeSet:
+      id: rcn-01-add-full-name
+      author: poc
+      labels: expand
+      preConditions:
+        - onFail: MARK_RAN
+        - not:
+            - columnExists:
+                tableName: customer
+                columnName: full_name
+      changes:
+        # Lock-safety: give up quickly instead of queueing behind a long query.
+        # The pipeline retries the phase if the timeout fires.
+        - sql:
+            dbms: postgresql
+            sql: SET lock_timeout = '2s'
+        - sql:
+            dbms: oracle
+            sql: ALTER SESSION SET ddl_lock_timeout = 2
+        - addColumn:
+            tableName: customer
+            columns:
+              - column:
+                  name: full_name
+                  type: VARCHAR(200)
+      rollback:
+        - dropColumn:
+            tableName: customer
+            columnName: full_name

@@ -1,0 +1,36 @@
+# Migration C6: index on a large table, built without blocking writes.
+# PostgreSQL: CREATE INDEX CONCURRENTLY cannot run inside a transaction,
+# hence runInTransaction: false.
+# Oracle: CREATE INDEX ... ONLINE.
+databaseChangeLog:
+  - changeSet:
+      id: idx-01-customer-email
+      author: poc
+      labels: expand
+      runInTransaction: false
+      preConditions:
+        - onFail: MARK_RAN
+        - not:
+            - indexExists:
+                tableName: customer
+                indexName: customer_email_ix
+      changes:
+        - sql:
+            dbms: postgresql
+            sql: SET lock_timeout = '2s'
+        - sql:
+            dbms: postgresql
+            sql: CREATE INDEX CONCURRENTLY IF NOT EXISTS customer_email_ix ON customer (email)
+        - sql:
+            dbms: oracle
+            sql: ALTER SESSION SET ddl_lock_timeout = 2
+        - sql:
+            dbms: oracle
+            sql: CREATE INDEX customer_email_ix ON customer (email) ONLINE
+      rollback:
+        - sql:
+            dbms: postgresql
+            sql: DROP INDEX CONCURRENTLY IF EXISTS customer_email_ix
+        - sql:
+            dbms: oracle
+            sql: DROP INDEX customer_email_ix ONLINE

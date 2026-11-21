@@ -1,0 +1,76 @@
+# Phase 3 - HARDEN
+# (a) Enforce NOT NULL on the new column in two steps, so the full-table
+#     check never runs under an exclusive lock.
+# (b) Relax NOT NULL on the OLD column, so app v4 (writes new only) can insert.
+# After this phase the pipeline rolls out app v3 (DUAL_WRITE_READ_NEW),
+# then v4 (NEW_ONLY).
+databaseChangeLog:
+  - changeSet:
+      id: rcn-03-full-name-check-not-valid
+      author: poc
+      labels: harden
+      preConditions:
+        - onFail: HALT
+        - columnExists:
+            tableName: customer
+            columnName: full_name
+      changes:
+        - sql:
+            dbms: postgresql
+            sql: SET lock_timeout = '2s'
+        - sql:
+            dbms: postgresql
+            sql: ALTER TABLE customer ADD CONSTRAINT customer_full_name_nn CHECK (full_name IS NOT NULL) NOT VALID
+        - sql:
+            dbms: oracle
+            sql: ALTER SESSION SET ddl_lock_timeout = 2
+        - sql:
+            dbms: oracle
+            sql: ALTER TABLE customer ADD CONSTRAINT customer_full_name_nn CHECK (full_name IS NOT NULL) ENABLE NOVALIDATE
+      rollback:
+        - sql:
+            sql: ALTER TABLE customer DROP CONSTRAINT customer_full_name_nn
+
+  - changeSet:
+      id: rcn-03-full-name-check-validate
+      author: poc
+      labels: harden
+      changes:
+        # PostgreSQL: VALIDATE takes SHARE UPDATE EXCLUSIVE - reads and writes continue.
+        - sql:
+            dbms: postgresql
+            sql: ALTER TABLE customer VALIDATE CONSTRAINT customer_full_name_nn
+        # Oracle: validating an enabled NOVALIDATE constraint does not block DML.
+        - sql:
+            dbms: oracle
+            sql: ALTER TABLE customer MODIFY CONSTRAINT customer_full_name_nn ENABLE VALIDATE
+      rollback:
+        # Validation changes no data; the constraint itself is removed by the
+        # previous changeset's rollback (explicit no-op here).
+        - sql:
+            dbms: postgresql
+            sql: SELECT 1
+        - sql:
+            dbms: oracle
+            sql: SELECT 1 FROM dual
+
+  - changeSet:
+      id: rcn-03-old-column-nullable
+      author: poc
+      labels: harden
+      changes:
+        - sql:
+            dbms: postgresql
+            sql: SET lock_timeout = '2s'
+        - sql:
+            dbms: oracle
+            sql: ALTER SESSION SET ddl_lock_timeout = 2
+        - dropNotNullConstraint:
+            tableName: customer
+            columnName: customer_name
+            columnDataType: VARCHAR(200)
+      rollback:
+        - addNotNullConstraint:
+            tableName: customer
+            columnName: customer_name
+            columnDataType: VARCHAR(200)

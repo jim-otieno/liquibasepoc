@@ -1,0 +1,31 @@
+app:
+  # OLD_ONLY (v1) | DUAL_WRITE_READ_OLD (v2) | DUAL_WRITE_READ_NEW (v3) | NEW_ONLY (v4)
+  schema-mode: ${APP_SCHEMA_MODE:OLD_ONLY}
+
+spring:
+  application:
+    name: customer-service
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/poc}
+    username: ${DB_USER:poc}
+    password: ${DB_PASSWORD:poc}
+    hikari:
+      maximum-pool-size: 20
+      # Fail fast: a request stuck behind a DDL lock should count as an error, not hang.
+      connection-timeout: 2000
+  # The pipeline owns schema changes; the app never migrates on startup.
+  liquibase:
+    enabled: false
+
+server:
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true

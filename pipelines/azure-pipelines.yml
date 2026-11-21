@@ -1,0 +1,119 @@
+# Phase-structured expand/contract pipeline (Azure DevOps, multi-stage YAML).
+#
+# Setup:
+#   - Variable group "poc-db" (link to Key Vault): LB_URL, LB_USER, LB_PASSWORD
+#   - Environments: "poc-db"           (no checks)
+#                   "poc-db-contract"  (Approvals and checks: required approver
+#                                       + Business hours / delay check = soak period)
+#   - A self-hosted agent pool "poc-pool" on the host that runs the Docker stack
+#     (Microsoft-hosted agents work for the CI stage only).
+trigger:
+  branches:
+    include: [main]
+  paths:
+    include: [db/*, app/*, tools/*]
+
+variables:
+  - group: poc-db
+  - name: LB_NETWORK
+    value: liquibase-poc_default
+  - name: RESULTS
+    value: $(Build.ArtifactStagingDirectory)/results
+
+stages:
+  - stage: CI
+    displayName: Lint, build, compatibility tests
+    pool: { vmImage: ubuntu-latest }
+    jobs:
+      - job: lint
+        steps:
+          - script: |
+              python3 -m pip install -q -r tools/phase-linter/requirements.txt
+              python3 tools/phase-linter/phase_lint.py db/changelog/db.changelog-master.yaml
+              python3 -m pytest -q tools/phase-linter
+            displayName: Phase linter
+      - job: build
+        steps:
+          - task: JavaToolInstaller@0
+            inputs: { versionSpec: '21', jdkArchitectureOption: x64, jdkSourceOption: PreInstalled }
+          - script: mvn -B verify
+            workingDirectory: app
+            displayName: Build + CompatibilityMatrixTest (Testcontainers)
+          - task: PublishTestResults@2
+            condition: always()
+            inputs: { testResultsFiles: 'app/target/surefire-reports/*.xml' }
+
+  - stage: Expand
+    dependsOn: CI
+    pool: poc-pool
+    jobs:
+      - deployment: expand
+        environment: poc-db
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - script: |
+                    mkdir -p "$(RESULTS)"
+                    scripts/liquibase.sh update-sql --label-filter=expand > "$(RESULTS)/expand.sql"
+                    scripts/deploy-phase.sh expand "$(Build.BuildId)"
+                    scripts/rolling-deploy.sh DUAL_WRITE_READ_OLD
+                  env: { LB_PASSWORD: $(LB_PASSWORD) }
+                  displayName: Expand + deploy v2 (dual-write)
+
+  - stage: Migrate
+    dependsOn: Expand
+    pool: poc-pool
+    jobs:
+      - deployment: migrate
+        environment: poc-db
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - script: |
+                    python3 -m pip install -q -r experiments/requirements.txt
+                    python3 experiments/backfill.py
+                    scripts/deploy-phase.sh migrate "$(Build.BuildId)"
+                    python3 experiments/verify_integrity.py
+                  env: { LB_PASSWORD: $(LB_PASSWORD), DB_USER: $(LB_USER), DB_PASSWORD: $(LB_PASSWORD) }
+                  displayName: Backfill + integrity gate
+
+  - stage: Harden
+    dependsOn: Migrate
+    pool: poc-pool
+    jobs:
+      - deployment: harden
+        environment: poc-db
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - script: |
+                    scripts/deploy-phase.sh harden "$(Build.BuildId)"
+                    scripts/rolling-deploy.sh DUAL_WRITE_READ_NEW
+                    scripts/rolling-deploy.sh NEW_ONLY
+                  env: { LB_PASSWORD: $(LB_PASSWORD) }
+                  displayName: Harden + switch reads, then writes
+
+  - stage: Contract
+    displayName: Contract (irreversible)
+    dependsOn: Harden
+    pool: poc-pool
+    jobs:
+      - deployment: contract
+        environment: poc-db-contract   # approval + soak delay configured on this environment
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - script: |
+                    python3 experiments/verify_integrity.py
+                    scripts/deploy-phase.sh contract "$(Build.BuildId)"
+                    python3 experiments/verify_integrity.py --after-contract
+                  env: { LB_PASSWORD: $(LB_PASSWORD), DB_USER: $(LB_USER), DB_PASSWORD: $(LB_PASSWORD) }
+                  displayName: Drop legacy column

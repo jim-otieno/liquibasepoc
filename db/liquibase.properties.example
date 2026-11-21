@@ -1,0 +1,14 @@
+# Copy to liquibase.properties (git-ignored) for local runs.
+# In CI, credentials come from Jenkins credentials or an Azure DevOps
+# variable group, never from this file.
+changelog-file: changelog/db.changelog-master.yaml
+
+# PostgreSQL (docker compose service "postgres")
+url: jdbc:postgresql://localhost:5432/poc
+username: poc
+password: poc
+
+# Oracle Database 23ai Free (docker compose profile "oracle")
+# url: jdbc:oracle:thin:@localhost:1521/FREEPDB1
+# username: poc
+# password: poc

@@ -1,0 +1,40 @@
+# Phase 4 - CONTRACT  (ONE-WAY DOOR)
+# Runs only after app v4 (NEW_ONLY) is fully rolled out and the soak period
+# has passed. The pipeline puts a manual approval gate in front of it.
+# Its rollback fails on purpose: dropped data cannot be restored by Liquibase.
+databaseChangeLog:
+  - changeSet:
+      id: rcn-04-drop-customer-name
+      author: poc
+      labels: contract
+      preConditions:
+        - onFail: HALT
+        - columnExists:
+            tableName: customer
+            columnName: customer_name
+        - sqlCheck:
+            expectedResult: 0
+            sql: SELECT COUNT(*) FROM customer WHERE full_name IS NULL
+      changes:
+        - sql:
+            dbms: postgresql
+            sql: SET lock_timeout = '2s'
+        # PostgreSQL: DROP COLUMN is metadata-only.
+        - sql:
+            dbms: postgresql
+            sql: ALTER TABLE customer DROP COLUMN customer_name
+        - sql:
+            dbms: oracle
+            sql: ALTER SESSION SET ddl_lock_timeout = 2
+        # Oracle: SET UNUSED is instant; reclaim space later, off-peak, with
+        #   ALTER TABLE customer DROP UNUSED COLUMNS CHECKPOINT 10000
+        - sql:
+            dbms: oracle
+            sql: ALTER TABLE customer SET UNUSED (customer_name)
+      rollback:
+        - sql:
+            dbms: postgresql
+            sql: SELECT 1/0 AS contract_is_irreversible_restore_from_backup
+        - sql:
+            dbms: oracle
+            sql: SELECT 1/0 AS contract_is_irreversible FROM dual
