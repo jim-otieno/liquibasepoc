@@ -17,9 +17,13 @@ NETWORK="${LB_NETWORK:-host}"
 : "${LB_USER:=poc}"
 : "${LB_PASSWORD:=poc}"
 
-# MSYS_NO_PATHCONV stops Git Bash on Windows rewriting /liquibase/... paths.
+# On Windows (Git Bash), give Docker a C:/... path it can mount;
+# MSYS_NO_PATHCONV stops Git Bash rewriting the /liquibase/... container paths.
+HOST_ROOT="$ROOT"
+if command -v cygpath >/dev/null 2>&1; then HOST_ROOT="$(cygpath -m "$ROOT")"; fi
+
 MSYS_NO_PATHCONV=1 docker run --rm --network "$NETWORK" \
-  -v "$ROOT/db/changelog:/liquibase/changelog:ro" \
+  -v "$HOST_ROOT/db/changelog:/liquibase/changelog:ro" \
   "$IMAGE" \
   --search-path=/liquibase/changelog \
   --changelog-file=db.changelog-master.yaml \

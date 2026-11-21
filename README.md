@@ -3,6 +3,10 @@
 Proof of concept for the research project *"Phase-structured expand-and-contract
 schema migrations with Liquibase for zero-downtime continuous deployment"*.
 
+> **New here? Start with [docs/SETUP.md](docs/SETUP.md).** It's a step-by-step
+> guide from an empty Windows machine to running the PoC locally, on AWS RDS
+> and in CI, plus exercises for changing it.
+
 Liquibase changesets are split into backward-compatible **phases**. The
 application **dual-writes** behind feature flags. A **phase linter** and a
 **compatibility-matrix test** enforce the two invariants:

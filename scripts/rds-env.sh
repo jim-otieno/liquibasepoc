@@ -29,7 +29,9 @@ export DB_SSLMODE=require
 export LB_URL=$(q "jdbc:postgresql://$HOST:5432/$DBNAME?sslmode=require")
 export LB_USER=$(q "$USER_NAME")
 export LB_PASSWORD=$(q "$PASS")
-export LB_NETWORK=host
+# Docker's default bridge network reaches the internet on Windows, macOS and Linux
+# (host networking is not available on Docker Desktop by default).
+export LB_NETWORK=bridge
 export APP_DB_URL=$(q "jdbc:postgresql://$HOST:5432/$DBNAME?sslmode=require")
 export APP_DB_USER=$(q "$USER_NAME")
 export APP_DB_PASSWORD=$(q "$PASS")
