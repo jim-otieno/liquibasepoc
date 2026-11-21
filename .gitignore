@@ -20,3 +20,9 @@ results/
 *.iml
 .DS_Store
 Thumbs.db
+
+# terraform
+infra/aws/.terraform/
+*.tfstate
+*.tfstate.*
+infra/aws/tfplan

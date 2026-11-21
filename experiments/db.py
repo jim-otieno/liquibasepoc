@@ -8,6 +8,7 @@ inject secrets:
     DB_NAME      PostgreSQL database or Oracle service name (default poc / FREEPDB1)
     DB_USER      default poc
     DB_PASSWORD  default poc
+    DB_SSLMODE   PostgreSQL only: prefer (default) | require (RDS forces TLS)
 """
 from __future__ import annotations
 
@@ -35,8 +36,9 @@ def connect(autocommit: bool = False):
 
     port = int(os.environ.get("DB_PORT", "5432"))
     dbname = os.environ.get("DB_NAME", "poc")
+    sslmode = os.environ.get("DB_SSLMODE", "prefer")
     return psycopg.connect(host=host, port=port, dbname=dbname, user=user, password=password,
-                           autocommit=autocommit)
+                           sslmode=sslmode, autocommit=autocommit)
 
 
 def param(i: int) -> str:

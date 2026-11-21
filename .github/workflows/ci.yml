@@ -60,25 +60,62 @@ jobs:
             grep -oE '<(failure|error) [^>]*message="[^"]{0,400}' "$f" | sed -E 's/.*message="/::error title=Test failure::/' || true
           done
 
-  phases-on-postgres:
+  # Runs every phase against the shared RDS PostgreSQL instance (infra/aws).
+  # Each run: assume an AWS role via OIDC (main branch only - never PRs or forks),
+  # open port 5432 to this runner's IP, create a throwaway database, run the
+  # phases, then drop the database and close the port.
+  phases-on-rds:
     runs-on: ubuntu-latest
     needs: phase-linter
-    services:
-      postgres:
-        image: postgres:16
-        env: { POSTGRES_DB: poc, POSTGRES_USER: poc, POSTGRES_PASSWORD: poc }
-        ports: ['5432:5432']
-        options: --health-cmd "pg_isready -U poc" --health-interval 5s --health-retries 20
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AWS_ROLE_ARN != ''
+    permissions:
+      id-token: write   # OIDC token for AWS
+      contents: read
+    concurrency:
+      group: rds-ci     # one run at a time touches the security group
+      cancel-in-progress: false
     env:
-      LB_URL: jdbc:postgresql://localhost:5432/poc
+      AWS_REGION: us-east-1
+      DB_INSTANCE: liquibase-poc
+      RUN_DB: ci_${{ github.run_id }}_${{ github.run_attempt }}
       LB_NETWORK: host
+      DB_SSLMODE: require
+      DB_KIND: postgresql
+      DB_PORT: '5432'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
       - run: pip install "psycopg[binary]>=3.1"
       - run: chmod +x scripts/*.sh
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Look up RDS, read password, open port to this runner
+        run: |
+          read -r HOST SECRET SG USER < <(aws rds describe-db-instances --db-instance-identifier "$DB_INSTANCE" \
+            --query 'DBInstances[0].[Endpoint.Address,MasterUserSecret.SecretArn,VpcSecurityGroups[0].VpcSecurityGroupId,MasterUsername]' \
+            --output text)
+          PASS="$(aws secretsmanager get-secret-value --secret-id "$SECRET" --query SecretString --output text | jq -r .password)"
+          echo "::add-mask::$PASS"
+          IP="$(curl -fsS https://checkip.amazonaws.com | tr -d '[:space:]')"
+          {
+            echo "DB_HOST=$HOST"; echo "DB_USER=$USER"; echo "DB_PASSWORD=$PASS"
+            echo "LB_USER=$USER"; echo "LB_PASSWORD=$PASS"
+            echo "LB_URL=jdbc:postgresql://$HOST:5432/$RUN_DB?sslmode=require"
+            echo "SG_ID=$SG"; echo "RUNNER_IP=$IP"
+          } >> "$GITHUB_ENV"
+          aws ec2 authorize-security-group-ingress --group-id "$SG" \
+            --ip-permissions "IpProtocol=tcp,FromPort=5432,ToPort=5432,IpRanges=[{CidrIp=$IP/32,Description=gha-$RUN_DB}]" >/dev/null
+          echo "opened 5432 to $IP for $RUN_DB"
+
+      - name: Create run database
+        run: DB_NAME=postgres python experiments/ci_database.py create "$RUN_DB"
+
       - name: Baseline + seed
+        env: { DB_NAME: '${{ env.RUN_DB }}' }
         run: |
           scripts/deploy-phase.sh baseline ci
           python experiments/seed_data.py --rows 50000
@@ -91,6 +128,7 @@ jobs:
         run: |
           if scripts/deploy-phase.sh migrate ci; then echo "migrate gate should have halted"; exit 1; fi
       - name: Backfill, migrate, harden, contract
+        env: { DB_NAME: '${{ env.RUN_DB }}' }
         run: |
           python experiments/backfill.py --batch 5000 --sleep-ms 0
           scripts/deploy-phase.sh migrate ci
@@ -99,3 +137,13 @@ jobs:
           scripts/deploy-phase.sh contract ci
           python experiments/verify_integrity.py --after-contract
       - run: scripts/liquibase.sh history
+
+      - name: Drop run database
+        if: always() && env.SG_ID != ''
+        run: DB_NAME=postgres python experiments/ci_database.py drop "$RUN_DB" || true
+      - name: Close port
+        if: always() && env.SG_ID != ''
+        run: |
+          aws ec2 revoke-security-group-ingress --group-id "$SG_ID" \
+            --ip-permissions "IpProtocol=tcp,FromPort=5432,ToPort=5432,IpRanges=[{CidrIp=$RUNNER_IP/32}]" >/dev/null
+          echo "closed 5432 for $RUNNER_IP"

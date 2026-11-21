@@ -81,6 +81,32 @@ Oracle: `docker compose -f infra/docker-compose.yml --profile oracle up -d`, the
 `DB_NAME=FREEPDB1`, and `APP_DB_URL=jdbc:oracle:thin:@oracle:1521/FREEPDB1` for the apps.
 The lock sampler needs `SELECT_CATALOG_ROLE` on the Oracle user.
 
+## AWS RDS target
+
+[infra/aws](infra/aws) creates an RDS PostgreSQL 16 instance (`db.t3.micro`,
+single-AZ, TLS forced, `log_lock_waits` on). The database is reachable only
+from your current public IP. The master password lives in Secrets Manager, never in
+git or Terraform state.
+
+```bash
+cd infra/aws && terraform init && terraform apply     # ~10 min; billable while it exists
+terraform output github_ci_role_arn                   # -> GitHub repo variable AWS_ROLE_ARN
+cd ../.. && eval "$(scripts/rds-env.sh)"              # point every script at RDS
+scripts/deploy-phase.sh baseline                      # ...then the phases as above
+terraform -chdir=infra/aws destroy                    # stop all charges
+```
+
+The `phases-on-rds` CI job runs on pushes to `main` once the `AWS_ROLE_ARN`
+repository variable is set. It assumes the role via GitHub OIDC (no stored AWS
+keys; pull requests and forks cannot assume it). It opens port 5432 to the
+runner's IP, works in a throwaway `ci_<run>` database, then drops the database
+and closes the port. Pull requests still run the linter and the Testcontainers
+compatibility test.
+
+`db.t3.micro` is burstable: CPU credits make timed latency measurements noisy.
+Use `-var instance_class=db.m7g.large` (or similar) for the real experiment
+runs, and destroy the instance between sessions.
+
 ## Experiment
 
 ```bash

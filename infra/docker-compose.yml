@@ -39,8 +39,8 @@ services:
     environment:
       APP_SCHEMA_MODE: ${APP_A_MODE:-OLD_ONLY}
       DB_URL: ${APP_DB_URL:-jdbc:postgresql://postgres:5432/poc}
-      DB_USER: poc
-      DB_PASSWORD: poc
+      DB_USER: ${APP_DB_USER:-poc}
+      DB_PASSWORD: ${APP_DB_PASSWORD:-poc}
     ports: ["8081:8080"]
     depends_on:
       postgres:
@@ -55,8 +55,8 @@ services:
     environment:
       APP_SCHEMA_MODE: ${APP_B_MODE:-OLD_ONLY}
       DB_URL: ${APP_DB_URL:-jdbc:postgresql://postgres:5432/poc}
-      DB_USER: poc
-      DB_PASSWORD: poc
+      DB_USER: ${APP_DB_USER:-poc}
+      DB_PASSWORD: ${APP_DB_PASSWORD:-poc}
     ports: ["8082:8080"]
 
   lb:
