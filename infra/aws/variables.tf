@@ -32,6 +32,12 @@ variable "admin_cidr" {
   default     = null
 }
 
+variable "github_repo_with_ids" {
+  description = "owner@owner_id/name@repo_id as GitHub puts it in the OIDC sub claim (see CloudTrail AssumeRoleWithWebIdentity events)."
+  type        = string
+  default     = "jim-otieno@63877969/liquibasepoc@1466400354"
+}
+
 variable "github_repo" {
   description = "owner/name of the repository whose main-branch workflows may use the database."
   type        = string

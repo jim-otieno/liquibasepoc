@@ -95,8 +95,9 @@ resource "aws_db_parameter_group" "poc" {
     value = "1"
   }
   parameter {
-    name  = "rds.force_ssl"
-    value = "1"
+    name         = "rds.force_ssl"
+    value        = "1"
+    apply_method = "pending-reboot" # static parameter (already the PostgreSQL 16 default)
   }
 }
 
@@ -153,7 +154,12 @@ data "aws_iam_policy_document" "github_trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repo}:ref:refs/heads/main"]
+      # GitHub now issues subjects with immutable owner/repo IDs (owner@id/repo@id);
+      # the ID form cannot be matched by another repo that later takes the same name.
+      values = [
+        "repo:${var.github_repo_with_ids}:ref:refs/heads/main",
+        "repo:${var.github_repo}:ref:refs/heads/main",
+      ]
     }
   }
 }
