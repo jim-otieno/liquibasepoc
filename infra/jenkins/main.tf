@@ -166,7 +166,7 @@ resource "aws_instance" "jenkins" {
 
   associate_public_ip_address = true
   user_data                   = file("${path.module}/user-data.sh")
-  user_data_replace_on_change = true
+  user_data_replace_on_change = false
 
   root_block_device {
     volume_type = "gp3"
@@ -184,7 +184,9 @@ resource "aws_instance" "jenkins" {
   }
 
   lifecycle {
-    ignore_changes = [ami] # a newer AL2023 image must not replace a configured Jenkins
+    # A newer AL2023 image or an edited first-boot script must not touch a configured
+    # Jenkins. user-data.sh only runs on a fresh instance (terraform apply -replace=aws_instance.jenkins).
+    ignore_changes = [ami, user_data]
   }
 
   tags = { Name = "${var.name}-jenkins" }

@@ -24,10 +24,13 @@ curl -fsSL -o /etc/yum.repos.d/jenkins.repo https://pkg.jenkins.io/rpm-stable/je
 dnf -y install jenkins
 
 # Keep the controller heap small so builds and Docker have room.
+# Temp files go to disk: AL2023's /tmp is a RAM-backed tmpfs (~half of RAM), below
+# Jenkins' 1 GB free-temp-space threshold, which would take the built-in node offline.
+install -d -o jenkins -g jenkins /var/lib/jenkins/tmp
 mkdir -p /etc/systemd/system/jenkins.service.d
 cat > /etc/systemd/system/jenkins.service.d/override.conf <<'EOF'
 [Service]
-Environment="JAVA_OPTS=-Djava.awt.headless=true -Xms256m -Xmx512m"
+Environment="JAVA_OPTS=-Djava.awt.headless=true -Xms256m -Xmx512m -Djava.io.tmpdir=/var/lib/jenkins/tmp"
 TimeoutStartSec=600
 EOF
 
