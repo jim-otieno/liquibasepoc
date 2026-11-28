@@ -18,14 +18,14 @@ databaseChangeLog:
       changes:
         - sql:
             dbms: postgresql
-            sql: SET lock_timeout = '2s'
+            sql: SET lock_timeout = '${lock_timeout}'
         # PostgreSQL: DROP COLUMN is metadata-only.
         - sql:
             dbms: postgresql
             sql: ALTER TABLE customer DROP COLUMN customer_name
         - sql:
             dbms: oracle
-            sql: ALTER SESSION SET ddl_lock_timeout = 2
+            sql: ALTER SESSION SET ddl_lock_timeout = ${ddl_lock_timeout}
         # Oracle: SET UNUSED is instant; reclaim space later, off-peak, with
         #   ALTER TABLE customer DROP UNUSED COLUMNS CHECKPOINT 10000
         - sql:

@@ -4,7 +4,25 @@
 # phase with:  liquibase update --label-filter=<phase>
 #
 # Phase labels: baseline | expand | migrate | migrate-inline | harden | contract
+#
+# Lock-safety parameters, used by every DDL changeset. These are the defaults.
+# A run can override them (JVM system property, e.g. scripts/liquibase.sh with
+# LB_LOCK_TIMEOUT=0); Liquibase gives passed values priority over these.
+#   lock_timeout      PostgreSQL SET lock_timeout. '2s' default; '0' = wait forever
+#                     (the no-timeout counterfactual for the experiment).
+#   ddl_lock_timeout  Oracle ALTER SESSION SET ddl_lock_timeout, in seconds.
+#                     Note: Oracle 0 means NOWAIT (fail at once), not "wait forever";
+#                     use a large value such as 1000000 for the Oracle counterfactual.
 databaseChangeLog:
+  - property:
+      name: lock_timeout
+      value: 2s
+      global: true
+  - property:
+      name: ddl_lock_timeout
+      value: "2"
+      global: true
+
   - include:
       file: releases/1.0-baseline/changelog.yaml
       relativeToChangelogFile: true

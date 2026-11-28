@@ -17,13 +17,13 @@ databaseChangeLog:
       changes:
         - sql:
             dbms: postgresql
-            sql: SET lock_timeout = '2s'
+            sql: SET lock_timeout = '${lock_timeout}'
         - sql:
             dbms: postgresql
             sql: ALTER TABLE customer ADD CONSTRAINT customer_full_name_nn CHECK (full_name IS NOT NULL) NOT VALID
         - sql:
             dbms: oracle
-            sql: ALTER SESSION SET ddl_lock_timeout = 2
+            sql: ALTER SESSION SET ddl_lock_timeout = ${ddl_lock_timeout}
         - sql:
             dbms: oracle
             sql: ALTER TABLE customer ADD CONSTRAINT customer_full_name_nn CHECK (full_name IS NOT NULL) ENABLE NOVALIDATE
@@ -61,10 +61,10 @@ databaseChangeLog:
       changes:
         - sql:
             dbms: postgresql
-            sql: SET lock_timeout = '2s'
+            sql: SET lock_timeout = '${lock_timeout}'
         - sql:
             dbms: oracle
-            sql: ALTER SESSION SET ddl_lock_timeout = 2
+            sql: ALTER SESSION SET ddl_lock_timeout = ${ddl_lock_timeout}
         - dropNotNullConstraint:
             tableName: customer
             columnName: customer_name

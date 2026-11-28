@@ -17,13 +17,13 @@ databaseChangeLog:
       changes:
         - sql:
             dbms: postgresql
-            sql: SET lock_timeout = '2s'
+            sql: SET lock_timeout = '${lock_timeout}'
         - sql:
             dbms: postgresql
             sql: CREATE INDEX CONCURRENTLY IF NOT EXISTS customer_email_ix ON customer (email)
         - sql:
             dbms: oracle
-            sql: ALTER SESSION SET ddl_lock_timeout = 2
+            sql: ALTER SESSION SET ddl_lock_timeout = ${ddl_lock_timeout}
         - sql:
             dbms: oracle
             sql: CREATE INDEX customer_email_ix ON customer (email) ONLINE

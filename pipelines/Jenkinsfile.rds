@@ -54,6 +54,7 @@ pipeline {
     booleanParam(name: 'WITH_PROBES', defaultValue: true, description: 'Run the app, k6 probe and lock sampler during the migration (needs a t3.medium Jenkins host)')
     string(name: 'PROBE_RATE', defaultValue: '20', description: 'k6 requests per second through the app')
     booleanParam(name: 'INJECT_LONG_READER', defaultValue: false, description: 'Hold a 15 s read transaction on customer while EXPAND runs (contention scenario)')
+    string(name: 'LOCK_TIMEOUT', defaultValue: '2s', description: "PostgreSQL lock_timeout for every DDL. '2s' = the lock-safe design; '0' = no timeout (the counterfactual: DDL waits behind the reader and traffic queues behind it)")
     booleanParam(name: 'APPROVE_CONTRACT', defaultValue: true, description: 'Pause for a human before the irreversible contract phase')
     booleanParam(name: 'KEEP_DATABASE', defaultValue: false, description: 'Keep the run database afterwards (for inspection; drop it yourself)')
   }
@@ -73,6 +74,8 @@ pipeline {
     RDS_INSTANCE       = "${params.RDS_INSTANCE ?: 'liquibase-poc'}"
     SEED_ROWS          = "${params.SEED_ROWS ?: '50000'}"
     PROBE_RATE         = "${params.PROBE_RATE ?: '20'}"
+    LB_LOCK_TIMEOUT    = "${params.LOCK_TIMEOUT ?: '2s'}"   // read by scripts/liquibase.sh
+    INJECT_LONG_READER = "${params.INJECT_LONG_READER ?: false}"
     RUN_DB             = "jenkins_${env.BUILD_NUMBER}"
     DB_SSLMODE         = 'require'
     RESULTS            = "results/${env.BUILD_NUMBER}"
@@ -91,6 +94,10 @@ pipeline {
           pip install -q -r tools/phase-linter/requirements.txt "psycopg[binary]>=3.1"
           chmod +x scripts/*.sh
           rm -rf "$RESULTS" && mkdir -p "$RESULTS"
+          # The settings that define this run, archived with its results.
+          printf 'build=%s\ncommit=%s\nseed_rows=%s\nprobe_rate=%s\ninject_long_reader=%s\nlock_timeout=%s\n' \
+            "$BUILD_NUMBER" "$(git rev-parse --short HEAD)" "$SEED_ROWS" "$PROBE_RATE" \
+            "$INJECT_LONG_READER" "$LB_LOCK_TIMEOUT" | tee "$RESULTS/run-params.txt"
           docker version --format 'Docker {{.Server.Version}}'
           free -m | awk '/Mem:/ {print "Memory: " $2 " MB total, " $7 " MB available"}'
         '''
@@ -159,6 +166,13 @@ pipeline {
 
     stage('Expand (and prove rollback)') {
       steps {
+        // Show the lock timeout Liquibase will actually send, from the generated SQL,
+        // so every build's log proves which arm (timeout or no timeout) it ran.
+        withRds('''
+          echo "LOCK_TIMEOUT parameter: $LB_LOCK_TIMEOUT"
+          sql_line="$(scripts/liquibase.sh update-sql --label-filter=expand 2>/dev/null | grep -m1 -i 'SET lock_timeout' || true)"
+          if [ -n "$sql_line" ]; then echo "expand will run: $sql_line"; else echo "WARNING: SET lock_timeout not found in the generated SQL"; fi
+        ''')
         script {
           if (params.INJECT_LONG_READER) {
             withRds('''

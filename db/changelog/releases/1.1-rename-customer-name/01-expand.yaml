@@ -19,10 +19,10 @@ databaseChangeLog:
         # The pipeline retries the phase if the timeout fires.
         - sql:
             dbms: postgresql
-            sql: SET lock_timeout = '2s'
+            sql: SET lock_timeout = '${lock_timeout}'
         - sql:
             dbms: oracle
-            sql: ALTER SESSION SET ddl_lock_timeout = 2
+            sql: ALTER SESSION SET ddl_lock_timeout = ${ddl_lock_timeout}
         - addColumn:
             tableName: customer
             columns:

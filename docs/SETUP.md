@@ -510,6 +510,8 @@ Read the `roll-*` rows separately from the schema phases. Failures there come fr
 
 Tick **INJECT_LONG_READER** to hold a 15-second read transaction on `customer` while EXPAND runs. The DDL then hits its 2-second lock timeout and `deploy-phase.sh` retries ("lock timeout: DDL yielded to traffic"). This is the contention scenario for RQ1. Compare `expand` in `summary.csv` with and without it.
 
+**LOCK_TIMEOUT** sets the PostgreSQL `lock_timeout` sent before every DDL. The default `2s` is the lock-safe design. `0` disables it: this is the **counterfactual** for RQ1. Run it together with **INJECT_LONG_READER**, and the expand DDL waits the full 15 s behind the reader while application queries queue behind the DDL. Before expand, the log prints the `SET lock_timeout` line Liquibase will actually send, and every build archives its settings in `run-params.txt`. The timeout is a changelog parameter (`${lock_timeout}`, default in `db/changelog/db.changelog-master.yaml`); outside Jenkins, set `LB_LOCK_TIMEOUT=0` before `scripts/deploy-phase.sh`.
+
 The first build with probes takes a few extra minutes, to build the app image and pull k6 and nginx; later builds reuse the cached images.
 
 ### H4. Living with the server
