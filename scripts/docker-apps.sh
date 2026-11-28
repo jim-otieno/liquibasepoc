@@ -77,8 +77,20 @@ case "${1:-}" in
     docker rm -f zdm-lb >/dev/null 2>&1 || true
     docker run -d --name zdm-lb --network "$NET" -p "$LB_PORT:8080" \
       -v "$ROOT/infra/nginx.conf:/etc/nginx/nginx.conf:ro" "$NGINX_IMAGE" >/dev/null
-    for _ in $(seq 1 30); do curl -fsS "http://localhost:$LB_PORT/customers/_mode" >/dev/null 2>&1 && break; sleep 1; done
-    echo "== apps up in $MODE behind nginx on :$LB_PORT"
+    ok=0
+    for i in $(seq 1 30); do
+      if curl -fsS "http://localhost:$LB_PORT/customers/_mode" >/dev/null 2>&1; then ok=1; break; fi
+      sleep 1
+    done
+    if [ $ok -ne 1 ]; then
+      echo "nginx on :$LB_PORT did not answer /customers/_mode within 30 s" >&2
+      echo "--- docker ps" >&2; docker ps --format '{{.Names}}  {{.Status}}  {{.Ports}}' >&2
+      echo "--- nginx logs" >&2; docker logs --tail 30 zdm-lb >&2 || true
+      echo "--- direct to app-a" >&2; curl -sS "http://localhost:8081/customers/_mode" >&2 || true
+      echo "--- through nginx" >&2; curl -sS -i "http://localhost:$LB_PORT/customers/_mode" >&2 || true
+      exit 1
+    fi
+    echo "== apps up in $MODE behind nginx on :$LB_PORT (answered after ${i} s)"
     ;;
   roll)
     need_db
