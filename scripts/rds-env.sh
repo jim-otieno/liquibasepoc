@@ -1,21 +1,32 @@
 #!/usr/bin/env bash
 # Print the environment for working against the RDS instance from this machine.
-# Reads Terraform outputs and the master password from Secrets Manager.
+# Reads Terraform outputs (or, with RDS_INSTANCE set, the AWS API) and the
+# master password from Secrets Manager.
 #
 #   eval "$(scripts/rds-env.sh)"          # all scripts now target RDS
 #   eval "$(scripts/rds-env.sh mydb)"     # a specific database on the instance
+#   export RDS_INSTANCE=liquibase-poc     # no Terraform state here (e.g. Jenkins):
+#   eval "$(scripts/rds-env.sh)"          #   look the instance up via the AWS API
 #
 # The password is only exported into your shell; it is never written to disk.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DBNAME="${1:-poc}"
+PY="$(command -v python || command -v python3)"
 tf() { terraform -chdir="$ROOT/infra/aws" output -raw "$1"; }
 
-HOST="$(tf endpoint)"
-USER_NAME="$(tf master_username)"
-PASS="$(aws secretsmanager get-secret-value --secret-id "$(tf master_secret_arn)" \
-        --query SecretString --output text | python -c 'import sys,json;print(json.load(sys.stdin)["password"])')"
+if [ -n "${RDS_INSTANCE:-}" ]; then
+  read -r HOST USER_NAME SECRET_ARN < <(aws rds describe-db-instances --db-instance-identifier "$RDS_INSTANCE" \
+    --query 'DBInstances[0].[Endpoint.Address,MasterUsername,MasterUserSecret.SecretArn]' --output text | tr -d '\r')
+  [ -n "${SECRET_ARN:-}" ] || { echo "rds-env: could not look up RDS instance $RDS_INSTANCE" >&2; exit 1; }
+else
+  HOST="$(tf endpoint)"
+  USER_NAME="$(tf master_username)"
+  SECRET_ARN="$(tf master_secret_arn)"
+fi
+PASS="$(aws secretsmanager get-secret-value --secret-id "$SECRET_ARN" \
+        --query SecretString --output text | "$PY" -c 'import sys,json;print(json.load(sys.stdin)["password"])')"
 
 q() { printf "%q" "$1"; }
 cat <<EOF

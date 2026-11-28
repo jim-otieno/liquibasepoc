@@ -21,8 +21,8 @@ results/
 .DS_Store
 Thumbs.db
 
-# terraform
-infra/aws/.terraform/
+# terraform (state and plans never go to git; .tf sources do)
+.terraform/
 *.tfstate
 *.tfstate.*
-infra/aws/tfplan
+tfplan

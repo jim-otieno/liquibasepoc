@@ -13,6 +13,7 @@ Do the parts in order. Each step ends with a **✅ Check**. Don't move on until 
 | [E. How it works](#part-e--how-the-poc-works) | A mental model of every file | No | reading |
 | [F. Make it yours](#part-f--make-it-yours-exercises) | Exercises: add a migration, break a rule, add a lint rule | No | 1–2 h |
 | [G. Troubleshooting](#part-g--troubleshooting) | Fixes for every problem hit so far | — | — |
+| [H. Jenkins on AWS](#part-h--jenkins-on-aws) | A Jenkins server that runs the phases on RDS, with an approval gate | Yes | 30 min |
 
 **Two shells, one rule.**
 - Blocks marked `powershell` run in PowerShell.
@@ -343,7 +344,8 @@ deploy-phase.sh expand
 | Change the local stack | `infra/docker-compose.yml`, `infra/nginx.conf`, `infra/prometheus.yml` |
 | Change the AWS database (size, version, access) | `infra/aws/variables.tf`, `infra/aws/main.tf` |
 | Change CI | `.github/workflows/ci.yml` |
-| Change Jenkins or Azure DevOps | `pipelines/Jenkinsfile`, `pipelines/azure-pipelines.yml` |
+| Change Jenkins or Azure DevOps | `pipelines/Jenkinsfile.rds` (RDS), `pipelines/Jenkinsfile` (full local stack), `pipelines/azure-pipelines.yml` |
+| Change the Jenkins server | `infra/jenkins/main.tf`, `infra/jenkins/user-data.sh` |
 
 ---
 
@@ -453,6 +455,57 @@ aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,Attribut
 
 ---
 
+## Part H — Jenkins on AWS
+
+An alternative to GitHub CI: a Jenkins server on EC2 runs the same phases against RDS, and pauses for a human before the irreversible contract phase.
+
+[infra/jenkins](../infra/jenkins) creates one `t3.micro` (Amazon Linux 2023, Jenkins LTS, Docker, Python 3.11, 2 GB swap). Port 8080 is open only to your IP. There is no SSH: you get a shell through SSM Session Manager. The instance role can read the RDS password from Secrets Manager, and the RDS security group admits the instance from inside the VPC, so the pipeline needs no Jenkins credentials and no per-run port opening.
+
+### H1. Create the server
+
+Needs Part C done (the RDS stack must exist).
+
+```bash
+terraform -chdir=infra/jenkins init
+terraform -chdir=infra/jenkins apply          # ~1 min, then Jenkins installs itself for 5-10 min
+bash scripts/setup/jenkins-unlock.sh          # waits, then prints the URL and unlock password
+```
+
+Run these in **Git Bash**. PowerShell has no `bash` command; from PowerShell use:
+
+```powershell
+& "C:\Program Files\Git\bin\bash.exe" scripts/setup/jenkins-unlock.sh
+```
+
+✅ **Check:** the URL opens a Jenkins "Unlock Jenkins" page.
+
+### H2. First-time Jenkins setup
+
+1. Paste the unlock password.
+2. Choose **Install suggested plugins** (a few minutes on a small instance).
+3. Create your admin user. Keep the Jenkins URL it proposes.
+
+### H3. Create the pipeline job
+
+1. **New Item** → name `liquibase-phases-rds` → **Pipeline** → OK.
+2. Under **Pipeline**: Definition **Pipeline script from SCM**, SCM **Git**, Repository URL `https://github.com/jim-otieno/liquibasepoc.git`, Branch `*/main`, Script Path `pipelines/Jenkinsfile.rds`.
+3. Save, then **Build Now**. The first build only registers the parameters; from then on use **Build with Parameters**.
+
+Each build creates a throwaway database `jenkins_<build>`, runs baseline → expand (plus a rollback test) → migrate gate → backfill → migrate → harden, waits for you to click **Run contract**, runs contract, and then drops the database.
+
+✅ **Check:** the build's **Stages** view is all green, and `Contract` shows the `history` table.
+
+### H4. Living with the server
+
+- Your public IP changed and the UI no longer loads: `terraform -chdir=infra/jenkins apply` (it re-detects the IP).
+- Shell on the server: `aws ssm start-session --target "$(terraform -chdir=infra/jenkins output -raw instance_id)"` (needs the [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)).
+- Install log: `sudo tail -50 /var/log/jenkins-bootstrap.log` on the server.
+- Slow builds: 1 GB is tight. `terraform -chdir=infra/jenkins apply -var instance_type=t3.small` doubles the memory and keeps the Jenkins data, because the instance is stopped and resized in place.
+- Stop paying for it: `terraform -chdir=infra/jenkins destroy`. RDS is untouched. Jenkins configuration and jobs are lost, so recreating the server means doing H2 and H3 again.
+- The UI is plain HTTP, limited to your IP. Put it behind HTTPS before opening it any wider.
+
+---
+
 ## Daily cheat sheet
 
 ```bash
@@ -472,5 +525,6 @@ scripts/liquibase.sh history                          # what has run
 python experiments/show_schema.py                     # what the table looks like now
 python tools/phase-linter/phase_lint.py db/changelog/db.changelog-master.yaml
 
+terraform -chdir=infra/jenkins destroy                # stop Jenkins charges (first: it uses the RDS stack)
 terraform -chdir=infra/aws destroy                    # stop AWS charges
 ```

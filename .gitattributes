@@ -1,6 +1,7 @@
 # Shell scripts and pipeline files must keep LF endings, also when checked out on Windows.
 *.sh        text eol=lf
-Jenkinsfile text eol=lf
+Jenkinsfile* text eol=lf
+*.tf        text eol=lf
 *.yml       text eol=lf
 *.yaml      text eol=lf
 *.py        text eol=lf

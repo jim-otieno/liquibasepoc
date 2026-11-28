@@ -1,0 +1,156 @@
+// Phase-structured expand/contract pipeline against AWS RDS (Jenkins declarative).
+//
+// Runs on the Jenkins controller built by infra/jenkins: the instance role reads
+// the RDS master password from Secrets Manager, and the RDS security group admits
+// the controller from inside the VPC, so no Jenkins credentials are needed.
+//
+// Each build works in a throwaway database jenkins_<build> on the shared
+// instance, walks every phase in order, proves the reversible phases roll back
+// and the migrate gate holds, then drops the database.
+//
+// The pipeline for the full local stack (apps + nginx + probes) is pipelines/Jenkinsfile.
+
+// Runs a bash snippet with the RDS environment loaded. The shebang turns off
+// Jenkins' default `sh -x` tracing, which would print the password.
+def withRds(String body) {
+  sh('#!/bin/bash\nset -euo pipefail\n. .venv/bin/activate\n' +
+     'eval "$(scripts/rds-env.sh "${TARGET_DB:-$RUN_DB}")"\n' +
+     'export LB_NETWORK=host   # resolve the RDS endpoint to its private VPC address\n' +
+     body)
+}
+
+pipeline {
+  agent any
+
+  parameters {
+    string(name: 'RDS_INSTANCE', defaultValue: 'liquibase-poc', description: 'RDS instance identifier (infra/aws)')
+    string(name: 'SEED_ROWS', defaultValue: '50000', description: 'Rows seeded before the phases run')
+    booleanParam(name: 'APPROVE_CONTRACT', defaultValue: true, description: 'Pause for a human before the irreversible contract phase')
+    booleanParam(name: 'KEEP_DATABASE', defaultValue: false, description: 'Keep the run database afterwards (for inspection; drop it yourself)')
+  }
+
+  options {
+    timestamps()
+    disableConcurrentBuilds()
+    timeout(time: 2, unit: 'HOURS')
+    buildDiscarder(logRotator(numToKeepStr: '20'))
+  }
+
+  environment {
+    AWS_REGION         = 'us-east-1'
+    AWS_DEFAULT_REGION = 'us-east-1'
+    RDS_INSTANCE       = "${params.RDS_INSTANCE}"
+    RUN_DB             = "jenkins_${env.BUILD_NUMBER}"
+    DB_SSLMODE         = 'require'
+  }
+
+  stages {
+    stage('Set up tools') {
+      steps {
+        sh '''#!/bin/bash
+          set -euo pipefail
+          [ -d .venv ] || python3.11 -m venv .venv
+          . .venv/bin/activate
+          pip install -q --upgrade pip
+          pip install -q -r tools/phase-linter/requirements.txt "psycopg[binary]>=3.1"
+          chmod +x scripts/*.sh
+          docker version --format 'Docker {{.Server.Version}}'
+        '''
+      }
+    }
+
+    stage('Lint changelog') {
+      steps {
+        sh '''#!/bin/bash
+          set -euo pipefail
+          . .venv/bin/activate
+          python tools/phase-linter/phase_lint.py db/changelog/db.changelog-master.yaml
+          python -m pytest -q tools/phase-linter
+        '''
+      }
+    }
+
+    stage('Create run database') {
+      environment { TARGET_DB = 'postgres' }
+      steps { withRds('python experiments/ci_database.py create "$RUN_DB"') }
+    }
+
+    stage('Baseline + seed') {
+      steps {
+        withRds('''
+          scripts/deploy-phase.sh baseline "$BUILD_NUMBER"
+          python experiments/seed_data.py --rows "$SEED_ROWS"
+        ''')
+      }
+    }
+
+    stage('Expand (and prove rollback)') {
+      steps {
+        withRds('''
+          scripts/deploy-phase.sh expand "$BUILD_NUMBER"
+          scripts/liquibase.sh rollback --tag="pre-expand-$BUILD_NUMBER"
+          scripts/deploy-phase.sh expand "$BUILD_NUMBER-r"
+        ''')
+      }
+    }
+
+    stage('Migrate gate refuses before backfill') {
+      steps {
+        withRds('''
+          if scripts/deploy-phase.sh migrate "$BUILD_NUMBER-early"; then
+            echo "migrate gate should have halted"; exit 1
+          fi
+          echo "gate held: migrate refused while customer_name values are not yet copied"
+        ''')
+      }
+    }
+
+    stage('Backfill + migrate') {
+      steps {
+        withRds('''
+          python experiments/backfill.py --batch 5000 --sleep-ms 0
+          scripts/deploy-phase.sh migrate "$BUILD_NUMBER"
+          python experiments/verify_integrity.py
+        ''')
+      }
+    }
+
+    stage('Harden') {
+      steps { withRds('scripts/deploy-phase.sh harden "$BUILD_NUMBER"') }
+    }
+
+    stage('Approve contract') {
+      when { expression { params.APPROVE_CONTRACT } }
+      steps {
+        timeout(time: 30, unit: 'MINUTES') {
+          input message: "CONTRACT drops customer.customer_name in ${env.RUN_DB}. This cannot be rolled back. Proceed?",
+                ok: 'Run contract'
+        }
+      }
+    }
+
+    stage('Contract') {
+      steps {
+        withRds('''
+          scripts/deploy-phase.sh contract "$BUILD_NUMBER"
+          python experiments/verify_integrity.py --after-contract
+          scripts/liquibase.sh history
+        ''')
+      }
+    }
+  }
+
+  post {
+    always {
+      script {
+        if (params.KEEP_DATABASE) {
+          echo "Keeping database ${env.RUN_DB}. Drop it later with: DB_NAME=postgres python experiments/ci_database.py drop ${env.RUN_DB}"
+        } else {
+          withEnv(['TARGET_DB=postgres']) {
+            withRds('python experiments/ci_database.py drop "$RUN_DB" || true')
+          }
+        }
+      }
+    }
+  }
+}
