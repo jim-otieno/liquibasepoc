@@ -16,9 +16,9 @@ variable "db_instance" {
 }
 
 variable "instance_type" {
-  description = "t3.micro (1 GB, free-tier eligible) works with swap but is slow; t3.small (2 GB) is noticeably smoother."
+  description = "t3.medium (4 GB) runs Jenkins plus the app build, two app instances, nginx and k6 for the probed pipeline. t3.micro (1 GB) only fits the Liquibase-only pipeline."
   type        = string
-  default     = "t3.micro"
+  default     = "t3.medium"
 }
 
 variable "disk_gb" {

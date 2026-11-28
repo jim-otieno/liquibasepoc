@@ -459,7 +459,7 @@ aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,Attribut
 
 An alternative to GitHub CI: a Jenkins server on EC2 runs the same phases against RDS, and pauses for a human before the irreversible contract phase.
 
-[infra/jenkins](../infra/jenkins) creates one `t3.micro` (Amazon Linux 2023, Jenkins LTS, Docker, Python 3.11, 2 GB swap). Port 8080 is open only to your IP. There is no SSH: you get a shell through SSM Session Manager. The instance role can read the RDS password from Secrets Manager, and the RDS security group admits the instance from inside the VPC, so the pipeline needs no Jenkins credentials and no per-run port opening.
+[infra/jenkins](../infra/jenkins) creates one `t3.medium` (4 GB; Amazon Linux 2023, Jenkins LTS, Docker, Python 3.11, 2 GB swap). That size is needed to build and run the app for the probes; `-var instance_type=t3.micro` is enough if you only run with `WITH_PROBES=false`. Port 8080 is open only to your IP. There is no SSH: you get a shell through SSM Session Manager. The instance role can read the RDS password from Secrets Manager, and the RDS security group admits the instance from inside the VPC, so the pipeline needs no Jenkins credentials and no per-run port opening.
 
 ### H1. Create the server
 
@@ -495,12 +495,29 @@ Each build creates a throwaway database `jenkins_<build>`, runs baseline → exp
 
 ✅ **Check:** the build's **Stages** view is all green, and `Contract` shows the `history` table.
 
+### H3b. Measure what users see (probes)
+
+With **WITH_PROBES** ticked (the default), the build also:
+- builds the app image and starts two instances behind nginx on the Jenkins host (port 8090, not reachable from outside);
+- rolls the instances v1 → v2 → v3 → v4 between phases, like a real rolling deployment;
+- runs **k6** at `PROBE_RATE` requests per second through nginx for the whole build;
+- runs the **lock sampler** on the build's database every 100 ms;
+- marks each phase's start and end.
+
+The **Collect results** stage prints a table per phase: seconds, blocked-session-seconds, maximum lock wait, requests, failed requests, availability % and p95/p99 latency. Everything is archived under the build's **Artifacts** (`results/<build>/`): `summary.csv`, `phases.csv`, `locks.csv`, `k6.csv`, `k6-summary.json` and `backfill.csv`.
+
+Read the `roll-*` rows separately from the schema phases. Failures there come from restarting app instances, not from the database.
+
+Tick **INJECT_LONG_READER** to hold a 15-second read transaction on `customer` while EXPAND runs. The DDL then hits its 2-second lock timeout and `deploy-phase.sh` retries ("lock timeout: DDL yielded to traffic"). This is the contention scenario for RQ1. Compare `expand` in `summary.csv` with and without it.
+
+The first build with probes takes a few extra minutes, to build the app image and pull k6 and nginx; later builds reuse the cached images.
+
 ### H4. Living with the server
 
 - Your public IP changed and the UI no longer loads: `terraform -chdir=infra/jenkins apply` (it re-detects the IP).
 - Shell on the server: `aws ssm start-session --target "$(terraform -chdir=infra/jenkins output -raw instance_id)"` (needs the [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)).
 - Install log: `sudo tail -50 /var/log/jenkins-bootstrap.log` on the server.
-- Slow builds: 1 GB is tight. `terraform -chdir=infra/jenkins apply -var instance_type=t3.small` doubles the memory and keeps the Jenkins data, because the instance is stopped and resized in place.
+- Resizing (`-var instance_type=...`) stops and restarts the instance in place and keeps the Jenkins data. It has no Elastic IP, so **its public URL changes**: run `terraform -chdir=infra/jenkins output -raw jenkins_url` for the new one.
 - Stop paying for it: `terraform -chdir=infra/jenkins destroy`. RDS is untouched. Jenkins configuration and jobs are lost, so recreating the server means doing H2 and H3 again.
 - The UI is plain HTTP, limited to your IP. Put it behind HTTPS before opening it any wider.
 

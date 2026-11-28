@@ -28,6 +28,7 @@ SELECT a.pid,
 FROM pg_stat_activity a
 LEFT JOIN pg_locks l ON l.pid = a.pid AND NOT l.granted
 WHERE cardinality(pg_blocking_pids(a.pid)) > 0
+  AND a.datname = current_database()   -- shared instance: count only this run's database
 """
 
 # Needs SELECT on v$session (grant SELECT_CATALOG_ROLE to the sampling user).

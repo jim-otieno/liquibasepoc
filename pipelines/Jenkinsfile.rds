@@ -8,7 +8,19 @@
 // instance, walks every phase in order, proves the reversible phases roll back
 // and the migrate gate holds, then drops the database.
 //
-// The pipeline for the full local stack (apps + nginx + probes) is pipelines/Jenkinsfile.
+// With WITH_PROBES (default), it also measures what users would see:
+//   - two app instances behind nginx (scripts/docker-apps.sh), rolled v1 -> v4
+//     between phases, exactly as a rolling deployment would
+//   - k6 sending PROBE_RATE requests/s through nginx for the whole run
+//   - the lock sampler recording every blocked session in the run database
+//   - phase boundaries (scripts/mark.sh), so results are attributed per phase
+// and archives results/<build>/ (summary.csv, locks.csv, k6.csv, phases.csv).
+// INJECT_LONG_READER holds a long read transaction while EXPAND runs: the
+// lock-safety retry then has something to do.
+//
+// Sizing: WITH_PROBES needs a t3.medium (4 GB) Jenkins host; t3.micro fits
+// the Liquibase-only run (WITH_PROBES=false).
+// The pipeline for the full local stack is pipelines/Jenkinsfile.
 
 // Runs a bash snippet with the RDS environment loaded. The shebang turns off
 // Jenkins' default `sh -x` tracing, which would print the password.
@@ -19,12 +31,29 @@ def withRds(String body) {
      body)
 }
 
+// Mark a phase boundary in results/<build>/phases.csv.
+def mark(String phase, String event) {
+  sh("#!/bin/bash\nscripts/mark.sh \"\$RESULTS\" ${phase} ${event}")
+}
+
+// Roll both app instances into a new schema mode (only when probes are on).
+def rollApps(String mode) {
+  if (params.WITH_PROBES) {
+    mark("roll-${mode}", 'start')
+    withRds("scripts/docker-apps.sh roll ${mode}")
+    mark("roll-${mode}", 'end')
+  }
+}
+
 pipeline {
   agent any
 
   parameters {
     string(name: 'RDS_INSTANCE', defaultValue: 'liquibase-poc', description: 'RDS instance identifier (infra/aws)')
     string(name: 'SEED_ROWS', defaultValue: '50000', description: 'Rows seeded before the phases run')
+    booleanParam(name: 'WITH_PROBES', defaultValue: true, description: 'Run the app, k6 probe and lock sampler during the migration (needs a t3.medium Jenkins host)')
+    string(name: 'PROBE_RATE', defaultValue: '20', description: 'k6 requests per second through the app')
+    booleanParam(name: 'INJECT_LONG_READER', defaultValue: false, description: 'Hold a 15 s read transaction on customer while EXPAND runs (contention scenario)')
     booleanParam(name: 'APPROVE_CONTRACT', defaultValue: true, description: 'Pause for a human before the irreversible contract phase')
     booleanParam(name: 'KEEP_DATABASE', defaultValue: false, description: 'Keep the run database afterwards (for inspection; drop it yourself)')
   }
@@ -42,6 +71,9 @@ pipeline {
     RDS_INSTANCE       = "${params.RDS_INSTANCE}"
     RUN_DB             = "jenkins_${env.BUILD_NUMBER}"
     DB_SSLMODE         = 'require'
+    RESULTS            = "results/${env.BUILD_NUMBER}"
+    K6_IMAGE           = 'grafana/k6:0.54.0'
+    LB_PORT            = '8090'   // nginx; Jenkins itself is on 8080
   }
 
   stages {
@@ -54,7 +86,9 @@ pipeline {
           pip install -q --upgrade pip
           pip install -q -r tools/phase-linter/requirements.txt "psycopg[binary]>=3.1"
           chmod +x scripts/*.sh
+          rm -rf "$RESULTS" && mkdir -p "$RESULTS"
           docker version --format 'Docker {{.Server.Version}}'
+          free -m | awk '/Mem:/ {print "Memory: " $2 " MB total, " $7 " MB available"}'
         '''
       }
     }
@@ -70,6 +104,11 @@ pipeline {
       }
     }
 
+    stage('Build app image') {
+      when { expression { params.WITH_PROBES } }
+      steps { sh '#!/bin/bash\nset -euo pipefail\nscripts/docker-apps.sh build' }
+    }
+
     stage('Create run database') {
       environment { TARGET_DB = 'postgres' }
       steps { withRds('python experiments/ci_database.py create "$RUN_DB"') }
@@ -77,20 +116,68 @@ pipeline {
 
     stage('Baseline + seed') {
       steps {
+        mark('baseline', 'start')
         withRds('''
           scripts/deploy-phase.sh baseline "$BUILD_NUMBER"
           python experiments/seed_data.py --rows "$SEED_ROWS"
         ''')
+        mark('baseline', 'end')
+      }
+    }
+
+    stage('Start app v1 + probes') {
+      when { expression { params.WITH_PROBES } }
+      steps {
+        withRds('''
+          scripts/docker-apps.sh up OLD_ONLY
+
+          # Lock sampler: JENKINS_NODE_COOKIE stops Jenkins killing it when this step ends.
+          JENKINS_NODE_COOKIE=dontKillMe nohup python experiments/lock_sampler.py \
+            --run-id "jenkins-$BUILD_NUMBER" --interval-ms 100 --out "$RESULTS/locks.csv" \
+            > "$RESULTS/lock_sampler.log" 2>&1 &
+          echo $! > "$RESULTS/lock_sampler.pid"
+
+          # k6 in a container (outlives this step); writes every sample to k6.csv.
+          docker rm -f zdm-k6 >/dev/null 2>&1 || true
+          docker run -d --name zdm-k6 --network host --user "$(id -u):$(id -g)" \
+            -v "$PWD/load:/load:ro" -v "$PWD/$RESULTS:/out" \
+            -e BASE_URL="http://localhost:$LB_PORT" -e RATE="$PROBE_RATE" -e DURATION=2h -e MAX_ID="$SEED_ROWS" \
+            "$K6_IMAGE" run --quiet --summary-export /out/k6-summary.json --out csv=/out/k6.csv \
+            /load/k6-availability.js >/dev/null
+          echo "probes running: lock sampler (pid $(cat "$RESULTS/lock_sampler.pid")), k6 at $PROBE_RATE req/s"
+        ''')
+        // Steady-state window before any schema change: the reference for every phase.
+        mark('steady-v1', 'start')
+        sleep time: 20, unit: 'SECONDS'
+        mark('steady-v1', 'end')
       }
     }
 
     stage('Expand (and prove rollback)') {
       steps {
+        script {
+          if (params.INJECT_LONG_READER) {
+            withRds('''
+              JENKINS_NODE_COOKIE=dontKillMe nohup python experiments/long_reader.py --hold-s 15 \
+                > "$RESULTS/long_reader.log" 2>&1 &
+              sleep 1
+              echo "long reader holding a read transaction on customer for 15 s"
+            ''')
+          }
+        }
+        mark('expand', 'start')
+        withRds('scripts/deploy-phase.sh expand "$BUILD_NUMBER"')
+        mark('expand', 'end')
+
+        // Reversibility proof, while app v1 (which never touches full_name) serves traffic.
+        mark('rollback', 'start')
         withRds('''
-          scripts/deploy-phase.sh expand "$BUILD_NUMBER"
           scripts/liquibase.sh rollback --tag="pre-expand-$BUILD_NUMBER"
           scripts/deploy-phase.sh expand "$BUILD_NUMBER-r"
         ''')
+        mark('rollback', 'end')
+
+        rollApps('DUAL_WRITE_READ_OLD')
       }
     }
 
@@ -107,35 +194,70 @@ pipeline {
 
     stage('Backfill + migrate') {
       steps {
+        mark('backfill', 'start')
+        withRds('python experiments/backfill.py --batch 5000 --sleep-ms 0 --out "$RESULTS/backfill.csv"')
+        mark('backfill', 'end')
+        mark('migrate', 'start')
         withRds('''
-          python experiments/backfill.py --batch 5000 --sleep-ms 0
           scripts/deploy-phase.sh migrate "$BUILD_NUMBER"
           python experiments/verify_integrity.py
         ''')
+        mark('migrate', 'end')
       }
     }
 
-    stage('Harden') {
-      steps { withRds('scripts/deploy-phase.sh harden "$BUILD_NUMBER"') }
+    stage('Harden + switch reads') {
+      steps {
+        mark('harden', 'start')
+        withRds('scripts/deploy-phase.sh harden "$BUILD_NUMBER"')
+        mark('harden', 'end')
+        rollApps('DUAL_WRITE_READ_NEW')
+        rollApps('NEW_ONLY')
+      }
     }
 
     stage('Approve contract') {
       when { expression { params.APPROVE_CONTRACT } }
       steps {
+        mark('approval-wait', 'start')
         timeout(time: 30, unit: 'MINUTES') {
           input message: "CONTRACT drops customer.customer_name in ${env.RUN_DB}. This cannot be rolled back. Proceed?",
                 ok: 'Run contract'
         }
+        mark('approval-wait', 'end')
       }
     }
 
     stage('Contract') {
       steps {
+        mark('contract', 'start')
         withRds('''
           scripts/deploy-phase.sh contract "$BUILD_NUMBER"
           python experiments/verify_integrity.py --after-contract
-          scripts/liquibase.sh history
         ''')
+        mark('contract', 'end')
+        withRds('scripts/liquibase.sh history')
+      }
+    }
+
+    stage('Collect results') {
+      when { expression { params.WITH_PROBES } }
+      steps {
+        mark('steady-v4', 'start')
+        sleep time: 15, unit: 'SECONDS'
+        mark('steady-v4', 'end')
+        sh '''#!/bin/bash
+          set -uo pipefail
+          . .venv/bin/activate
+          # Stop k6 gracefully so it writes its summary, then the sampler.
+          docker kill --signal=SIGINT zdm-k6 >/dev/null 2>&1 || true
+          timeout 60 docker wait zdm-k6 >/dev/null 2>&1 || true
+          docker logs zdm-k6 > "$RESULTS/k6.log" 2>&1 || true
+          docker rm -f zdm-k6 >/dev/null 2>&1 || true
+          [ -f "$RESULTS/lock_sampler.pid" ] && kill "$(cat "$RESULTS/lock_sampler.pid")" 2>/dev/null || true
+          sleep 2
+          python experiments/summarize_run.py "$RESULTS" --run-id "jenkins-$BUILD_NUMBER" --interval-ms 100
+        '''
       }
     }
   }
@@ -143,6 +265,13 @@ pipeline {
   post {
     always {
       script {
+        // Make sure nothing keeps running against the database we are about to drop.
+        sh '''#!/bin/bash
+          docker rm -f zdm-k6 >/dev/null 2>&1 || true
+          [ -f "$RESULTS/lock_sampler.pid" ] && kill "$(cat "$RESULTS/lock_sampler.pid")" 2>/dev/null || true
+          scripts/docker-apps.sh down || true
+        '''
+        archiveArtifacts allowEmptyArchive: true, artifacts: "${env.RESULTS}/**"
         if (params.KEEP_DATABASE) {
           echo "Keeping database ${env.RUN_DB}. Drop it later with: DB_NAME=postgres python experiments/ci_database.py drop ${env.RUN_DB}"
         } else {

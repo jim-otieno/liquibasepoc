@@ -30,6 +30,7 @@ export const options = {
     zdm_available: ['rate>0.999'],
     http_req_duration: ['p(99)<500'],
   },
+  summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(95)', 'p(99)'],
 };
 
 const params = { headers: { 'Content-Type': 'application/json' }, timeout: '2s' };
